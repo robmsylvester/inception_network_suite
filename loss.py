@@ -38,43 +38,49 @@ def regularizer(tensor_list, reg_type='l2', weight_lambda=1.0, scope=None):
 
 def softmax_cross_entropy_with_laplace_smoothing(logits, one_hot_labels, laplace_pseudocount=0., scale=1.0, scope=None):
     """Creates and returns a softmax cross entropy from logits to one hot labels with additive smoothing. Scales
-    by an optional scaler
+    by an optional scaler. 
     
     Args:
-     logits - Tensor. Shape is [batch_size, num_classes]
+     logits - Tensor. Shape is [batch_size, num_classes]. Alternatively, a list of tensors, each with shape [batch_size, num_classes]. this is necessary because often we have models with multiple classifiers.
      one_hot_labels - Tensor. Shape is [batch_size, num_classes]
      laplace_psuedocount - float between 0 and 1
-     scale - float, scale total loss by this factor
+     scale - float, scale total loss by this factor. Alternatively, a list of floats that is the same length as the logits argument list.
      scope - optional tensorflow parent scope
     
     Returns: Tensor containing the softmax cross entropy loss
     """
     
-    scale = tf.convert_to_tensor(scale,
-                                dtype=logits.dtype.base_dtype,
-                                name='ce_loss_scale')
+    if logits.__class__.__name__=='Tensor':
+        logits = [logits]
+        if isinstance(scale, list):
+            assert len(scale)==1, "If using a single Tensor as logits argument, scale must be a single float or a list with a single float."
+        else:
+            scale = [scale]
+    else:
+        assert isinstance(logits, list), "logits argument must be Tensor class from tensorflow, a list of Tensors"
+        assert isinstance(scale, list), "if using a list of Tensors as logits argument, you must pass a list of scales."
+        assert len(scale)==len(logits), "You must have a scale for each Tensor in the logits argument."
     
+    scale = [tf.convert_to_tensor(w,
+                                  dtype=logits[0].dtype.base_dtype,
+                                  name='ce_loss_w_%d'%idx) for idx,w in enumerate(scale)]
+        
     assert laplace_pseudocount < 1. and laplace_pseudocount > 0., "pseudocount needs to be between 0 and 1"
     
-    logits.get_shape().assert_is_compatible_with(one_hot_labels.get_shape())
+    logits[0].get_shape().assert_is_compatible_with(one_hot_labels.get_shape())
     
-    with tf.name_scope(scope, 'softmax_cross_entropy_loss', [logits, one_hot_labels]):
-        one_hot_labels = tf.cast(one_hot_labels, logits.dtype)
+    with tf.name_scope(scope, 'softmax_cross_entropy_loss', [logits, one_hot_labels, scale]):
+        one_hot_labels = tf.cast(one_hot_labels, logits[0].dtype)
         
         positives = 1.0 - laplace_pseudocount
         negatives = laplace_pseudocount / float(one_hot_labels.get_shape()[-1].value) # num classes
         
         one_hot_labels = one_hot_labels * positives + negatives
         
-        ce = tf.nn.softmax_cross_entropy_with_logits(logits=logits, labels=one_hot_labels, name="cross_entropy_loss")
-        
-        loss = tf.multiply(scale, tf.reduce_mean(ce), name="ce_value")
-        return loss
-        
-        
-
-
-# In[ ]:
-
-
-
+        #inception models have multiple classifiers, so we weight all their logits
+        losses = []
+        print scale
+        for idx, (classifier_logits, classifier_weight) in enumerate(zip(logits, scale)):
+            ce = tf.nn.softmax_cross_entropy_with_logits(logits=classifier_logits, labels=one_hot_labels, name="cross_entropy_loss_%d" % idx)
+            losses.append(tf.multiply(classifier_weight, tf.reduce_mean(ce), name="ce_value_%d" % idx))
+        return tf.add_n(losses, "weighted_classifier_loss")
